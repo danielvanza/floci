@@ -407,6 +407,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             throw new AwsException("DeleteConflict",
                     "Cannot delete entity, must remove from all groups first.", 409);
         }
+        if (loginProfiles.get(userName).isPresent()) {
+            throw new AwsException("DeleteConflict",
+                    "Cannot delete entity, must delete login profile first.", 409);
+        }
         users.delete(userName);
         LOG.infov("Deleted IAM user: {0}", userName);
     }
@@ -444,6 +448,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             if (newPath != null) user.setPath(normalizePath(newPath));
             user.setArn(iamArn("user", user.getPath(), newUserName));
             users.put(newUserName, user);
+            loginProfiles.get(userName).ifPresent(profile -> {
+                loginProfiles.delete(userName);
+                profile.setUserName(newUserName);
+                loginProfiles.put(newUserName, profile);
+            });
         } else {
             if (newPath != null) {
                 user.setPath(normalizePath(newPath));

@@ -17,7 +17,8 @@ import static org.hamcrest.Matchers.notNullValue;
  *
  * <p>Ordered: a login profile is a single per-user value, so these cases share state
  * deliberately: missing before create, create, duplicate create, get-after-create, update,
- * update against an unknown user, delete, missing after delete, duplicate delete.
+ * update against an unknown user, delete-user conflict, delete, missing after delete,
+ * duplicate delete, delete the user.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -162,6 +163,20 @@ class IamLoginProfileIntegrationTest {
 
     @Test
     @Order(9)
+    void deleteUserWhileProfileExistsIsDeleteConflict() {
+        given()
+            .formParam("Action", "DeleteUser")
+            .formParam("UserName", USER_NAME)
+            .header("Authorization", IAM_CREDENTIAL)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(409)
+            .body("ErrorResponse.Error.Code", equalTo("DeleteConflict"));
+    }
+
+    @Test
+    @Order(10)
     void deleteRemovesTheProfile() {
         given()
             .formParam("Action", "DeleteLoginProfile")
@@ -174,7 +189,7 @@ class IamLoginProfileIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(11)
     void getAfterDeleteIsNoSuchEntity() {
         given()
             .formParam("Action", "GetLoginProfile")
@@ -188,7 +203,7 @@ class IamLoginProfileIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     void deleteAgainIsNoSuchEntity() {
         given()
             .formParam("Action", "DeleteLoginProfile")
@@ -199,5 +214,18 @@ class IamLoginProfileIntegrationTest {
         .then()
             .statusCode(404)
             .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"));
+    }
+
+    @Test
+    @Order(13)
+    void deleteTheUser() {
+        given()
+            .formParam("Action", "DeleteUser")
+            .formParam("UserName", USER_NAME)
+            .header("Authorization", IAM_CREDENTIAL)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 }

@@ -319,6 +319,37 @@ class IamServiceTest {
     }
 
     @Test
+    void deleteUserWithLoginProfileIsDeleteConflict() {
+        iamService.createUser("alice", "/");
+        iamService.createLoginProfile("alice", "Sup3r$ecret!", false);
+
+        AwsException ex = assertThrows(AwsException.class, () -> iamService.deleteUser("alice"));
+        assertEquals("DeleteConflict", ex.getErrorCode());
+        assertEquals("alice", iamService.getUser("alice").getUserName());
+
+        iamService.deleteLoginProfile("alice");
+        iamService.deleteUser("alice");
+        iamService.createUser("alice", "/");
+        assertThrows(AwsException.class, () -> iamService.getLoginProfile("alice"));
+    }
+
+    @Test
+    void renamingAUserMovesItsLoginProfile() {
+        iamService.createUser("alice", "/");
+        iamService.createLoginProfile("alice", "Sup3r$ecret!", true);
+
+        iamService.updateUser("alice", "alicia", null);
+
+        LoginProfile moved = iamService.getLoginProfile("alicia");
+        assertEquals("alicia", moved.getUserName());
+        assertEquals("Sup3r$ecret!", moved.getPassword());
+        assertTrue(moved.isPasswordResetRequired());
+        iamService.createUser("alice", "/");
+        AwsException ex = assertThrows(AwsException.class, () -> iamService.getLoginProfile("alice"));
+        assertEquals("NoSuchEntity", ex.getErrorCode());
+    }
+
+    @Test
     void createLoginProfileRejectsPasswordOutsideWireCharacterSet() {
         iamService.createUser("alice", "/");
 

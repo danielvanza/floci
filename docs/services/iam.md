@@ -259,6 +259,12 @@ also checked against that policy's length and character-class requirements, with
 `PasswordPolicyViolation` returned on either action if it doesn't comply. The password itself is never
 echoed back by any of these actions, matching AWS.
 
+`DeleteUser` on a user that still has a login profile returns `DeleteConflict`, as on AWS: delete
+the profile first. Renaming a user with `UpdateUser` carries its login profile to the new name.
+Floci still does not require access keys, inline policies, or other credentials to be removed
+before `DeleteUser`; only attached managed policies, group membership, and the login profile block
+it.
+
 ### Policy Simulation
 
 | Action | Description |
