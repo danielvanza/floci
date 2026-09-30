@@ -713,6 +713,138 @@ class AutoScalingReconcilerTest {
                 eq("Failed"));
     }
 
+    @Test
+    void terminatingStoppedInstanceIsRetriedRatherThanPrunedAsStale() {
+        AutoScalingService asgService = mock(AutoScalingService.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        ElbV2Service elbV2Service = mock(ElbV2Service.class);
+        stubActivityRecording(asgService);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
+        AutoScalingGroup asg = new AutoScalingGroup();
+        asg.setRegion("us-east-1");
+        asg.setAutoScalingGroupName("app-asg");
+        asg.setDesiredCapacity(0);
+        asg.getInstances().add(instance("i-term", "Terminating"));
+        when(ec2Service.terminateInstances("us-east-1", List.of("i-term")))
+                .thenThrow(new AwsException("InsufficientInstanceCapacity", "termination refused", 500));
+        when(ec2Service.describeInstances("us-east-1", List.of("i-term"), null))
+                .thenReturn(List.of(reservation(ec2Instance("i-term", InstanceState.stopped()))));
+
+        reconciler.reconcile(asg);
+
+        assertEquals(1, asg.getInstances().size());
+        assertEquals("Terminating", asg.getInstances().getFirst().getLifecycleState());
+        verify(asgService).recordActivity(
+                eq("us-east-1"),
+                eq("app-asg"),
+                eq("Terminating EC2 instance(s) for refresh: [i-term]"),
+                eq("An instance refresh requested replacement of active instances."),
+                eq("Failed"));
+        verify(asgService, never()).recordActivity(
+                eq("us-east-1"),
+                eq("app-asg"),
+                eq("Removing stale EC2 instance reference(s): [i-term]"),
+                anyString(),
+                anyString());
+    }
+
+    @Test
+    void pendingStoppedInstanceIsStillPrunedAsStale() {
+        AutoScalingService asgService = mock(AutoScalingService.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        ElbV2Service elbV2Service = mock(ElbV2Service.class);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
+        AutoScalingGroup asg = new AutoScalingGroup();
+        asg.setRegion("us-east-1");
+        asg.setAutoScalingGroupName("app-asg");
+        asg.setDesiredCapacity(0);
+        asg.getInstances().add(instance("i-pending", "Pending"));
+        when(ec2Service.describeInstances("us-east-1", List.of("i-pending"), null))
+                .thenReturn(List.of(reservation(ec2Instance("i-pending", InstanceState.stopped()))));
+
+        reconciler.reconcile(asg);
+
+        assertEquals(0, asg.getInstances().size());
+        verify(asgService).recordActivity(
+                eq("us-east-1"),
+                eq("app-asg"),
+                eq("Removing stale EC2 instance reference(s): [i-pending]"),
+                eq("Persisted Auto Scaling state referenced instance containers that are no longer running."),
+                eq("Successful"));
+    }
+
+    @Test
+    void repeatedTerminationFailureIsRecordedOnceWhenOtherActivitiesFollowIt() {
+        AutoScalingService asgService = mock(AutoScalingService.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        ElbV2Service elbV2Service = mock(ElbV2Service.class);
+        stubActivityRecording(asgService);
+        when(asgService.describeScalingActivities("us-east-1", "app-asg"))
+                .thenReturn(List.of(
+                        failedActivity("Terminating EC2 instance(s) for refresh: [i-other]"),
+                        failedActivity("Terminating EC2 instance(s): [i-keep]")));
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
+        AutoScalingGroup asg = new AutoScalingGroup();
+        asg.setRegion("us-east-1");
+        asg.setAutoScalingGroupName("app-asg");
+        asg.setDesiredCapacity(0);
+        asg.getInstances().add(instance("i-keep", "InService"));
+        when(ec2Service.isInstanceContainerRunning("i-keep")).thenReturn(true);
+        when(ec2Service.terminateInstances("us-east-1", List.of("i-keep")))
+                .thenThrow(new AwsException("InsufficientInstanceCapacity", "termination refused", 500));
+
+        reconciler.reconcile(asg);
+
+        verify(asgService, never()).recordActivity(
+                eq("us-east-1"),
+                eq("app-asg"),
+                eq("Terminating EC2 instance(s): [i-keep]"),
+                eq("An instance was terminated in response to a desired capacity change."),
+                eq("Failed"));
+    }
+
+    @Test
+    void failedActivityStatusMessageIsCappedAt255Characters() {
+        AutoScalingService asgService = mock(AutoScalingService.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        stubActivityRecording(asgService);
+        AutoScalingReconciler reconciler =
+                new AutoScalingReconciler(asgService, ec2Service, mock(ElbV2Service.class));
+        AutoScalingGroup asg = new AutoScalingGroup();
+        asg.setRegion("us-east-1");
+        asg.setAutoScalingGroupName("app-asg");
+        asg.setDesiredCapacity(0);
+        asg.getInstances().add(instance("i-keep", "InService"));
+        when(ec2Service.isInstanceContainerRunning("i-keep")).thenReturn(true);
+        when(ec2Service.terminateInstances("us-east-1", List.of("i-keep")))
+                .thenThrow(new IllegalStateException("x".repeat(300)));
+
+        reconciler.reconcile(asg);
+
+        verify(asgService).completeActivity("activity-1", "Failed", "x".repeat(255));
+    }
+
+    @Test
+    void failedActivityWithoutAnErrorMessageNamesTheException() {
+        AutoScalingService asgService = mock(AutoScalingService.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        stubActivityRecording(asgService);
+        AutoScalingReconciler reconciler =
+                new AutoScalingReconciler(asgService, ec2Service, mock(ElbV2Service.class));
+        AutoScalingGroup asg = new AutoScalingGroup();
+        asg.setRegion("us-east-1");
+        asg.setAutoScalingGroupName("app-asg");
+        asg.setDesiredCapacity(0);
+        asg.getInstances().add(instance("i-keep", "InService"));
+        when(ec2Service.isInstanceContainerRunning("i-keep")).thenReturn(true);
+        when(ec2Service.terminateInstances("us-east-1", List.of("i-keep")))
+                .thenThrow(new IllegalStateException());
+
+        reconciler.reconcile(asg);
+
+        verify(asgService).completeActivity("activity-1", "Failed", "IllegalStateException");
+    }
+
     private static ScalingActivity stubActivityRecording(AutoScalingService asgService) {
         ScalingActivity activity = new ScalingActivity();
         activity.setActivityId("activity-1");
@@ -729,9 +861,13 @@ class AutoScalingReconcilerTest {
     }
 
     private static Instance runningEc2Instance(String instanceId) {
+        return ec2Instance(instanceId, InstanceState.running());
+    }
+
+    private static Instance ec2Instance(String instanceId, InstanceState state) {
         Instance ec2Instance = new Instance();
         ec2Instance.setInstanceId(instanceId);
-        ec2Instance.setState(InstanceState.running());
+        ec2Instance.setState(state);
         return ec2Instance;
     }
 

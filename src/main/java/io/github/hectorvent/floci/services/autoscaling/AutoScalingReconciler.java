@@ -43,6 +43,19 @@ public class AutoScalingReconciler {
     private static final Set<String> LAUNCH_TEMPLATE_NOT_FOUND_CODES =
             Set.of("InvalidLaunchTemplateName.NotFoundException", "InvalidLaunchTemplateId.NotFound");
 
+    /** EC2 states in which a launch that never came up is given up on. */
+    private static final Set<String> ABANDONED_LAUNCH_STATES =
+            Set.of("shutting-down", "terminated", "stopping", "stopped");
+
+    /**
+     * EC2 states of an instance that is already going away. A stopped instance still exists and
+     * still needs terminating, so it is not one of them.
+     */
+    private static final Set<String> TERMINATED_STATES = Set.of("shutting-down", "terminated");
+
+    /** The Activity StatusMessage limit (XmlStringMaxLen255). */
+    private static final int STATUS_MESSAGE_MAX_LENGTH = 255;
+
     private final AutoScalingService asgService;
     private final Ec2Service ec2Service;
     private final ElbV2Service elbV2Service;
@@ -217,13 +230,17 @@ public class AutoScalingReconciler {
         if ("InService".equals(lifecycleState)) {
             return !ec2Service.isInstanceContainerRunning(instance.getInstanceId());
         }
-        if ("Pending".equals(lifecycleState) || "Terminating".equals(lifecycleState)) {
-            return isMissingOrTerminalEc2Instance(asg, instance.getInstanceId());
+        if ("Pending".equals(lifecycleState)) {
+            return isMissingOrTerminalEc2Instance(asg, instance.getInstanceId(), ABANDONED_LAUNCH_STATES);
+        }
+        if ("Terminating".equals(lifecycleState)) {
+            return isMissingOrTerminalEc2Instance(asg, instance.getInstanceId(), TERMINATED_STATES);
         }
         return false;
     }
 
-    private boolean isMissingOrTerminalEc2Instance(AutoScalingGroup asg, String instanceId) {
+    private boolean isMissingOrTerminalEc2Instance(AutoScalingGroup asg, String instanceId,
+                                                   Set<String> terminalStates) {
         try {
             List<Instance> ec2Instances = ec2Service
                     .describeInstances(asg.getRegion(), List.of(instanceId), null)
@@ -236,10 +253,7 @@ public class AutoScalingReconciler {
             String state = ec2Instances.getFirst().getState() != null
                     ? ec2Instances.getFirst().getState().getName()
                     : null;
-            return "shutting-down".equals(state)
-                    || "terminated".equals(state)
-                    || "stopping".equals(state)
-                    || "stopped".equals(state);
+            return state != null && terminalStates.contains(state);
         }
         catch (Exception e) {
             LOG.debugv("ASG {0}: keeping instance {1} during stale check: {2}",
@@ -299,11 +313,11 @@ public class AutoScalingReconciler {
             // A terminating instance whose EC2 record is already gone is not a failure: it is pruned
             // as stale by removeStaleInstances in this same pass. Only real failures are recorded.
             List<String> stillPresent = instanceIds.stream()
-                    .filter(id -> !isMissingOrTerminalEc2Instance(asg, id))
+                    .filter(id -> !isMissingOrTerminalEc2Instance(asg, id, TERMINATED_STATES))
                     .toList();
             if (!stillPresent.isEmpty()) {
                 recordFailedActivity(asg, "Terminating EC2 instance(s) for refresh: " + stillPresent,
-                        "An instance refresh requested replacement of active instances.", e.getMessage());
+                        "An instance refresh requested replacement of active instances.", e);
             }
             return;
         }
@@ -420,7 +434,7 @@ public class AutoScalingReconciler {
             LOG.warnv("ASG {0}: failed to terminate instances {1}: {2}",
                     asg.getAutoScalingGroupName(), instanceIds, e.getMessage());
             recordFailedActivity(asg, "Terminating EC2 instance(s): " + instanceIds,
-                    "An instance was terminated in response to a desired capacity change.", e.getMessage());
+                    "An instance was terminated in response to a desired capacity change.", e);
             return;
         }
 
@@ -437,19 +451,35 @@ public class AutoScalingReconciler {
 
     /**
      * Records a failed scaling activity with the error text, matching AWS (100% progress and a
-     * {@code StatusMessage}). A failure that repeats on the next pass, because termination keeps
-     * failing, is not recorded again: the previous failed activity already describes it.
+     * {@code StatusMessage}). A failure that repeats on a later pass, because termination keeps
+     * failing, is not recorded again: the latest activity with the same description already records
+     * it, whatever other activities were recorded after it.
      */
-    private void recordFailedActivity(AutoScalingGroup asg, String description, String cause, String message) {
-        ScalingActivity latest = asgService.describeScalingActivities(asg.getRegion(), asg.getAutoScalingGroupName())
-                .stream().findFirst().orElse(null);
-        if (latest != null && "Failed".equals(latest.getStatusCode())
-                && description.equals(latest.getDescription())) {
+    private void recordFailedActivity(AutoScalingGroup asg, String description, String cause, Exception failure) {
+        ScalingActivity previous = asgService.describeScalingActivities(asg.getRegion(), asg.getAutoScalingGroupName())
+                .stream()
+                .filter(activity -> description.equals(activity.getDescription()))
+                .findFirst()
+                .orElse(null);
+        if (previous != null && "Failed".equals(previous.getStatusCode())) {
             return;
         }
         ScalingActivity activity = asgService.recordActivity(asg.getRegion(), asg.getAutoScalingGroupName(),
                 description, cause, "Failed");
-        asgService.completeActivity(activity.getActivityId(), "Failed", message);
+        asgService.completeActivity(activity.getActivityId(), "Failed", statusMessage(failure));
+    }
+
+    private static String statusMessage(Exception failure) {
+        String message = failure.getMessage() != null && !failure.getMessage().isBlank()
+                ? failure.getMessage()
+                : failure.getClass().getSimpleName();
+        if (message.length() <= STATUS_MESSAGE_MAX_LENGTH) {
+            return message;
+        }
+        int end = Character.isHighSurrogate(message.charAt(STATUS_MESSAGE_MAX_LENGTH - 1))
+                ? STATUS_MESSAGE_MAX_LENGTH - 1
+                : STATUS_MESSAGE_MAX_LENGTH;
+        return message.substring(0, end);
     }
 
     private void deregisterFromTargetGroups(AutoScalingGroup asg, List<String> instanceIds) {
