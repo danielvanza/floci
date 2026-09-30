@@ -590,7 +590,7 @@ class AutoScalingReconcilerTest {
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         stubActivityRecording(asgService);
         when(asgService.describeScalingActivities("us-east-1", "app-asg"))
-                .thenReturn(List.of(failedActivity("Terminating EC2 instance(s): [i-keep]")));
+                .thenReturn(List.of(failedActivity("Terminating EC2 instance(s): [i-keep]", "termination refused")));
         AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
         AutoScalingGroup asg = new AutoScalingGroup();
         asg.setRegion("us-east-1");
@@ -781,8 +781,8 @@ class AutoScalingReconcilerTest {
         stubActivityRecording(asgService);
         when(asgService.describeScalingActivities("us-east-1", "app-asg"))
                 .thenReturn(List.of(
-                        failedActivity("Terminating EC2 instance(s) for refresh: [i-other]"),
-                        failedActivity("Terminating EC2 instance(s): [i-keep]")));
+                        failedActivity("Terminating EC2 instance(s) for refresh: [i-other]", "termination refused"),
+                        failedActivity("Terminating EC2 instance(s): [i-keep]", "termination refused")));
         AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
         AutoScalingGroup asg = new AutoScalingGroup();
         asg.setRegion("us-east-1");
@@ -801,6 +801,35 @@ class AutoScalingReconcilerTest {
                 eq("Terminating EC2 instance(s): [i-keep]"),
                 eq("An instance was terminated in response to a desired capacity change."),
                 eq("Failed"));
+    }
+
+    @Test
+    void terminationFailureWithADifferentErrorIsRecordedAgain() {
+        AutoScalingService asgService = mock(AutoScalingService.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        stubActivityRecording(asgService);
+        when(asgService.describeScalingActivities("us-east-1", "app-asg"))
+                .thenReturn(List.of(failedActivity("Terminating EC2 instance(s): [i-keep]", "termination refused")));
+        AutoScalingReconciler reconciler =
+                new AutoScalingReconciler(asgService, ec2Service, mock(ElbV2Service.class));
+        AutoScalingGroup asg = new AutoScalingGroup();
+        asg.setRegion("us-east-1");
+        asg.setAutoScalingGroupName("app-asg");
+        asg.setDesiredCapacity(0);
+        asg.getInstances().add(instance("i-keep", "InService"));
+        when(ec2Service.isInstanceContainerRunning("i-keep")).thenReturn(true);
+        when(ec2Service.terminateInstances("us-east-1", List.of("i-keep")))
+                .thenThrow(new AwsException("RequestLimitExceeded", "Request limit exceeded.", 503));
+
+        reconciler.reconcile(asg);
+
+        verify(asgService).recordActivity(
+                eq("us-east-1"),
+                eq("app-asg"),
+                eq("Terminating EC2 instance(s): [i-keep]"),
+                eq("An instance was terminated in response to a desired capacity change."),
+                eq("Failed"));
+        verify(asgService).completeActivity("activity-1", "Failed", "Request limit exceeded.");
     }
 
     @Test
@@ -853,10 +882,11 @@ class AutoScalingReconcilerTest {
         return activity;
     }
 
-    private static ScalingActivity failedActivity(String description) {
+    private static ScalingActivity failedActivity(String description, String statusMessage) {
         ScalingActivity activity = new ScalingActivity();
         activity.setDescription(description);
         activity.setStatusCode("Failed");
+        activity.setStatusMessage(statusMessage);
         return activity;
     }
 

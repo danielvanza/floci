@@ -451,22 +451,25 @@ public class AutoScalingReconciler {
 
     /**
      * Records a failed scaling activity with the error text, matching AWS (100% progress and a
-     * {@code StatusMessage}). A failure that repeats on a later pass, because termination keeps
-     * failing, is not recorded again: the latest activity with the same description already records
-     * it, whatever other activities were recorded after it.
+     * {@code StatusMessage}). A failure that repeats on a later pass with the same error, because
+     * termination keeps failing, is not recorded again: the latest activity with the same
+     * description already records it, whatever other activities were recorded after it. A
+     * different error is recorded, so the history carries the current reason.
      */
     private void recordFailedActivity(AutoScalingGroup asg, String description, String cause, Exception failure) {
+        String statusMessage = statusMessage(failure);
         ScalingActivity previous = asgService.describeScalingActivities(asg.getRegion(), asg.getAutoScalingGroupName())
                 .stream()
                 .filter(activity -> description.equals(activity.getDescription()))
                 .findFirst()
                 .orElse(null);
-        if (previous != null && "Failed".equals(previous.getStatusCode())) {
+        if (previous != null && "Failed".equals(previous.getStatusCode())
+                && statusMessage.equals(previous.getStatusMessage())) {
             return;
         }
         ScalingActivity activity = asgService.recordActivity(asg.getRegion(), asg.getAutoScalingGroupName(),
                 description, cause, "Failed");
-        asgService.completeActivity(activity.getActivityId(), "Failed", statusMessage(failure));
+        asgService.completeActivity(activity.getActivityId(), "Failed", statusMessage);
     }
 
     private static String statusMessage(Exception failure) {
