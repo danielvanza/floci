@@ -6,7 +6,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.sync.RequestBody;
@@ -24,6 +24,7 @@ import software.amazon.awssdk.services.s3.model.S3Exception;
 import java.net.URI;
 import java.util.List;
 import java.util.UUID;
+import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -69,9 +70,13 @@ class S3AclHeaderValidationIntegrationTest {
         s3.close();
     }
 
+    static Stream<String> grantHeaders() {
+        return Stream.of("x-amz-grant-read", "x-amz-grant-write", "x-amz-grant-full-control",
+                "x-amz-grant-read-acp", "x-amz-grant-write-acp");
+    }
+
     @ParameterizedTest
-    @ValueSource(strings = {"x-amz-grant-read", "x-amz-grant-write", "x-amz-grant-full-control",
-            "x-amz-grant-read-acp", "x-amz-grant-write-acp"})
+    @MethodSource("grantHeaders")
     void putBucketAclRefusesCannedAclWithGrantHeader(String grantHeader) {
         List<Grant> before = s3.getBucketAcl(request -> request.bucket(bucket)).grants();
 
@@ -83,8 +88,7 @@ class S3AclHeaderValidationIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"x-amz-grant-read", "x-amz-grant-write", "x-amz-grant-full-control",
-            "x-amz-grant-read-acp", "x-amz-grant-write-acp"})
+    @MethodSource("grantHeaders")
     void putObjectAclRefusesCannedAclWithGrantHeader(String grantHeader) {
         List<Grant> before = s3.getObjectAcl(request -> request.bucket(bucket).key("existing")).grants();
 
@@ -96,8 +100,7 @@ class S3AclHeaderValidationIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"x-amz-grant-read", "x-amz-grant-write", "x-amz-grant-full-control",
-            "x-amz-grant-read-acp", "x-amz-grant-write-acp"})
+    @MethodSource("grantHeaders")
     void putObjectRefusesCannedAclWithGrantHeader(String grantHeader) {
         assertRefused(() -> s3.putObject(request -> request.bucket(bucket).key("refused")
                         .acl(ObjectCannedACL.PRIVATE)
@@ -108,8 +111,7 @@ class S3AclHeaderValidationIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"x-amz-grant-read", "x-amz-grant-write", "x-amz-grant-full-control",
-            "x-amz-grant-read-acp", "x-amz-grant-write-acp"})
+    @MethodSource("grantHeaders")
     void copyObjectRefusesCannedAclWithGrantHeader(String grantHeader) {
         assertRefused(() -> s3.copyObject(request -> request
                 .sourceBucket(bucket).sourceKey("existing")
@@ -121,8 +123,7 @@ class S3AclHeaderValidationIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"x-amz-grant-read", "x-amz-grant-write", "x-amz-grant-full-control",
-            "x-amz-grant-read-acp", "x-amz-grant-write-acp"})
+    @MethodSource("grantHeaders")
     void createMultipartUploadRefusesCannedAclWithGrantHeader(String grantHeader) {
         assertRefused(() -> s3.createMultipartUpload(request -> request.bucket(bucket).key("multipart")
                 .acl(ObjectCannedACL.PRIVATE)

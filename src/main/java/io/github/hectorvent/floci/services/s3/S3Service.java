@@ -6560,15 +6560,15 @@ public class S3Service implements Resettable, ResourceProvider {
                                        String grantRead, String grantWrite,
                                        String grantFullControl, String grantReadAcp,
                                        String grantWriteAcp) {
-        if (!isBlank(cannedAcl) && (!isBlank(grantRead) || !isBlank(grantWrite)
-                || !isBlank(grantFullControl) || !isBlank(grantReadAcp) || !isBlank(grantWriteAcp))) {
+        boolean hasGrants = !isBlank(grantRead) || !isBlank(grantWrite) || !isBlank(grantFullControl)
+                || !isBlank(grantReadAcp) || !isBlank(grantWriteAcp);
+        if (!isBlank(cannedAcl) && hasGrants) {
             throw new AwsException("InvalidRequest", "Specifying both Canned ACLs and Header Grants is not allowed", 400);
         }
         if (!isBlank(cannedAcl)) {
             return cannedObjectAclXml(ownerAccount, cannedAcl);
         }
-        if (isBlank(grantRead) && isBlank(grantWrite) && isBlank(grantFullControl)
-                && isBlank(grantReadAcp) && isBlank(grantWriteAcp)) {
+        if (!hasGrants) {
             return null;
         }
         List<String> grants = new ArrayList<>();
